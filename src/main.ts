@@ -53,10 +53,7 @@ const FACE_OVAL = [
   162, 21, 54, 103, 67, 109,
 ];
 
-fileEl.addEventListener("change", async () => {
-  const f = fileEl.files?.[0];
-  if (!f) return;
-
+async function processFile(f: File) {
   try {
     const lm = await initLandmarker();
     statusEl.textContent = "画像読み込み中…";
@@ -80,11 +77,9 @@ fileEl.addEventListener("change", async () => {
       return;
     }
 
-    const strength = Number(strengthEl.value);
-
     // 1顔ずつ輪郭でクリップしてモザイク
     for (const face of faces) {
-      mosaicFaceOval(ctx, face, img.width, img.height, strength);
+      mosaicFaceOval(ctx, face, img.width, img.height);
     }
 
     statusEl.textContent = `完了：${faces.length}人`;
@@ -92,6 +87,21 @@ fileEl.addEventListener("change", async () => {
     console.error(e);
     statusEl.textContent = "エラー（コンソール見て）";
   }
+}
+
+fileEl.addEventListener("change", () => {
+  const f = fileEl.files?.[0];
+  if (f) processFile(f);
+});
+
+// ドラッグ＆ドロップ対応
+document.addEventListener("dragover", (e) => {
+  e.preventDefault();
+});
+document.addEventListener("drop", (e) => {
+  e.preventDefault();
+  const f = e.dataTransfer?.files[0];
+  if (f && f.type.startsWith("image/")) processFile(f);
 });
 
 downloadBtn.addEventListener("click", () => {
@@ -108,15 +118,23 @@ function mosaicFaceOval(
   landmarks: Landmark[],
   imgW: number,
   imgH: number,
-  blockSize: number
 ) {
   // 輪郭点をピクセル座標に
-  const pts = FACE_OVAL
+  const rawPts = FACE_OVAL
     .map((i) => landmarks[i])
     .filter(Boolean)
     .map((p) => ({ x: p.x * imgW, y: p.y * imgH }));
 
-  if (pts.length < 3) return;
+  if (rawPts.length < 3) return;
+
+  // 重心を求めて12%拡大
+  const cx = rawPts.reduce((s, p) => s + p.x, 0) / rawPts.length;
+  const cy = rawPts.reduce((s, p) => s + p.y, 0) / rawPts.length;
+  const expand = 1.12;
+  const pts = rawPts.map((p) => ({
+    x: cx + (p.x - cx) * expand,
+    y: cy + (p.y - cy) * expand,
+  }));
 
   // 輪郭の外接バウンディング（モザイク処理の範囲を最小化＝軽い）
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -127,10 +145,14 @@ function mosaicFaceOval(
     maxY = Math.max(maxY, p.y);
   }
 
-  // 余白（輪郭のズレ対策、少しだけ）
-  const pad = 0.08;
   const w = maxX - minX;
   const h = maxY - minY;
+
+  // 顔幅に応じてブロックサイズを自動調整（スライダー値は無視）
+  const effectiveBlock = Math.max(12, Math.min(32, w / 12));
+
+  // 余白（輪郭のズレ対策、少しだけ）
+  const pad = 0.08;
 
   const x = clamp(minX - w * pad, 0, imgW);
   const y = clamp(minY - h * pad, 0, imgH);
@@ -138,7 +160,7 @@ function mosaicFaceOval(
   const ch = clamp(h * (1 + pad * 2), 1, imgH - y);
 
   // ① まず「範囲だけ」モザイク画像を作る（小さく→拡大）
-  const mosaicked = buildMosaicPatch(ctx2d.canvas, x, y, cw, ch, blockSize);
+  const mosaicked = buildMosaicPatch(ctx2d.canvas, x, y, cw, ch, effectiveBlock);
 
   // ② 輪郭でクリップして、その中だけ貼る（輪郭ピッタリ）
   ctx2d.save();

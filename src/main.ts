@@ -1,18 +1,21 @@
+import JSZip from "jszip";
 import { FaceLandmarker, FilesetResolver } from "@mediapipe/tasks-vision";
 
 const fileEl = document.getElementById("file") as HTMLInputElement;
-const canvas = document.getElementById("canvas") as HTMLCanvasElement;
-const ctx = canvas.getContext("2d")!;
+const preview = document.getElementById("preview") as HTMLCanvasElement;
+const pctx = preview.getContext("2d")!;
 const strengthEl = document.getElementById("strength") as HTMLInputElement;
 const strengthValEl = document.getElementById("strengthVal") as HTMLSpanElement;
 const statusEl = document.getElementById("status") as HTMLSpanElement;
-const downloadBtn = document.getElementById("download") as HTMLButtonElement;
+const downloadZipBtn = document.getElementById("downloadZip") as HTMLButtonElement;
+const dropEl = document.getElementById("drop") as HTMLDivElement;
 
 strengthEl.addEventListener("input", () => {
   strengthValEl.textContent = strengthEl.value;
 });
 
 let landmarker: FaceLandmarker | null = null;
+let lastZipBlob: Blob | null = null;
 
 async function initLandmarker() {
   if (landmarker) return landmarker;
@@ -23,17 +26,18 @@ async function initLandmarker() {
     "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
   );
 
-  // 公式配布のモデルURL例（taskファイル）
   const modelAssetPath =
     "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
 
   landmarker = await FaceLandmarker.createFromOptions(vision, {
     baseOptions: {
       modelAssetPath,
-      // delegate: "GPU", // 写真だけならCPUで十分。GPUは環境差でハマりやすい
+      // 写真のみ＆安定優先：CPUでOK
+      // delegate: "GPU",
     },
     runningMode: "IMAGE",
-    numFaces: 10,
+    // 複数"人"も一応多めに
+    numFaces: 20,
     outputFaceBlendshapes: false,
     outputFacialTransformationMatrixes: false,
   });
@@ -43,8 +47,7 @@ async function initLandmarker() {
 }
 
 /**
- * Face Oval（輪郭）に使う代表的な点インデックス
- * ※MediaPipe Face Meshでよく使われる輪郭ループ
+ * Face Oval（輪郭）ループ（MediaPipe Face Meshでよく使われる）
  */
 const FACE_OVAL = [
   10, 338, 297, 332, 284, 251, 389, 356, 454, 323,
@@ -53,90 +56,60 @@ const FACE_OVAL = [
   162, 21, 54, 103, 67, 109,
 ];
 
-async function processFile(f: File) {
-  try {
-    const lm = await initLandmarker();
-    statusEl.textContent = "画像読み込み中…";
+type Landmark = { x: number; y: number; z?: number };
 
-    const img = await createImageBitmap(f);
-
-    // 実ピクセルで描画
-    canvas.width = img.width;
-    canvas.height = img.height;
-
-    ctx.imageSmoothingEnabled = true;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, 0, 0);
-
-    statusEl.textContent = "輪郭検出中…";
-    const res = lm.detect(img);
-    const faces = res.faceLandmarks ?? [];
-
-    if (faces.length === 0) {
-      statusEl.textContent = "顔が見つからなかった";
-      return;
-    }
-
-    // 1顔ずつ輪郭でクリップしてモザイク
-    for (const face of faces) {
-      mosaicFaceOval(ctx, face, img.width, img.height);
-    }
-
-    statusEl.textContent = `完了：${faces.length}人`;
-  } catch (e) {
-    console.error(e);
-    statusEl.textContent = "エラー（コンソール見て）";
-  }
+function clamp(v: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, v));
 }
 
-fileEl.addEventListener("change", () => {
-  const f = fileEl.files?.[0];
-  if (f) processFile(f);
-});
+function buildMosaicPatch(
+  sourceCanvas: HTMLCanvasElement,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  blockSize: number
+) {
+  const tmp1 = document.createElement("canvas");
+  tmp1.width = Math.ceil(w);
+  tmp1.height = Math.ceil(h);
+  const t1 = tmp1.getContext("2d")!;
+  t1.drawImage(sourceCanvas, x, y, w, h, 0, 0, tmp1.width, tmp1.height);
 
-// ドラッグ＆ドロップ対応
-document.addEventListener("dragover", (e) => {
-  e.preventDefault();
-});
-document.addEventListener("drop", (e) => {
-  e.preventDefault();
-  const f = e.dataTransfer?.files[0];
-  if (f && f.type.startsWith("image/")) processFile(f);
-});
+  const sw = Math.max(1, Math.floor(tmp1.width / blockSize));
+  const sh = Math.max(1, Math.floor(tmp1.height / blockSize));
 
-downloadBtn.addEventListener("click", () => {
-  const a = document.createElement("a");
-  a.download = "face-oval-mosaic.png";
-  a.href = canvas.toDataURL("image/png");
-  a.click();
-});
+  const tmp2 = document.createElement("canvas");
+  tmp2.width = sw;
+  tmp2.height = sh;
+  const t2 = tmp2.getContext("2d")!;
+  t2.imageSmoothingEnabled = false;
+  t2.drawImage(tmp1, 0, 0, sw, sh);
 
-type Landmark = { x: number; y: number; z?: number };
+  const out = document.createElement("canvas");
+  out.width = tmp1.width;
+  out.height = tmp1.height;
+  const o = out.getContext("2d")!;
+  o.imageSmoothingEnabled = false;
+  o.drawImage(tmp2, 0, 0, sw, sh, 0, 0, out.width, out.height);
+
+  return out;
+}
 
 function mosaicFaceOval(
   ctx2d: CanvasRenderingContext2D,
   landmarks: Landmark[],
   imgW: number,
   imgH: number,
+  blockSize: number
 ) {
-  // 輪郭点をピクセル座標に
-  const rawPts = FACE_OVAL
+  const pts = FACE_OVAL
     .map((i) => landmarks[i])
     .filter(Boolean)
     .map((p) => ({ x: p.x * imgW, y: p.y * imgH }));
 
-  if (rawPts.length < 3) return;
+  if (pts.length < 3) return;
 
-  // 重心を求めて12%拡大
-  const cx = rawPts.reduce((s, p) => s + p.x, 0) / rawPts.length;
-  const cy = rawPts.reduce((s, p) => s + p.y, 0) / rawPts.length;
-  const expand = 1.12;
-  const pts = rawPts.map((p) => ({
-    x: cx + (p.x - cx) * expand,
-    y: cy + (p.y - cy) * expand,
-  }));
-
-  // 輪郭の外接バウンディング（モザイク処理の範囲を最小化＝軽い）
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const p of pts) {
     minX = Math.min(minX, p.x);
@@ -145,24 +118,18 @@ function mosaicFaceOval(
     maxY = Math.max(maxY, p.y);
   }
 
+  // 余白（漏れ対策。必要なら 0.10〜0.14 に上げてOK）
+  const pad = 0.10;
   const w = maxX - minX;
   const h = maxY - minY;
-
-  // 顔幅に応じてブロックサイズを自動調整（スライダー値は無視）
-  const effectiveBlock = Math.max(12, Math.min(32, w / 12));
-
-  // 余白（輪郭のズレ対策、少しだけ）
-  const pad = 0.08;
 
   const x = clamp(minX - w * pad, 0, imgW);
   const y = clamp(minY - h * pad, 0, imgH);
   const cw = clamp(w * (1 + pad * 2), 1, imgW - x);
   const ch = clamp(h * (1 + pad * 2), 1, imgH - y);
 
-  // ① まず「範囲だけ」モザイク画像を作る（小さく→拡大）
-  const mosaicked = buildMosaicPatch(ctx2d.canvas, x, y, cw, ch, effectiveBlock);
+  const mosaicked = buildMosaicPatch(ctx2d.canvas, x, y, cw, ch, blockSize);
 
-  // ② 輪郭でクリップして、その中だけ貼る（輪郭ピッタリ）
   ctx2d.save();
   ctx2d.beginPath();
   ctx2d.moveTo(pts[0].x, pts[0].y);
@@ -176,42 +143,135 @@ function mosaicFaceOval(
   ctx2d.restore();
 }
 
-function buildMosaicPatch(
-  sourceCanvas: HTMLCanvasElement,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  blockSize: number
-) {
-  // tmp1: 切り出し
-  const tmp1 = document.createElement("canvas");
-  tmp1.width = Math.ceil(w);
-  tmp1.height = Math.ceil(h);
-  const t1 = tmp1.getContext("2d")!;
-  t1.drawImage(sourceCanvas, x, y, w, h, 0, 0, tmp1.width, tmp1.height);
-
-  // tmp2: 縮小
-  const sw = Math.max(1, Math.floor(tmp1.width / blockSize));
-  const sh = Math.max(1, Math.floor(tmp1.height / blockSize));
-  const tmp2 = document.createElement("canvas");
-  tmp2.width = sw;
-  tmp2.height = sh;
-  const t2 = tmp2.getContext("2d")!;
-  t2.imageSmoothingEnabled = false;
-  t2.drawImage(tmp1, 0, 0, sw, sh);
-
-  // out: 拡大（nearest）
-  const out = document.createElement("canvas");
-  out.width = tmp1.width;
-  out.height = tmp1.height;
-  const o = out.getContext("2d")!;
-  o.imageSmoothingEnabled = false;
-  o.drawImage(tmp2, 0, 0, sw, sh, 0, 0, out.width, out.height);
-
-  return out;
+async function canvasToPngBlob(canvas: HTMLCanvasElement): Promise<Blob> {
+  return await new Promise((resolve, reject) => {
+    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob failed"))), "image/png");
+  });
 }
 
-function clamp(v: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, v));
+function safeBaseName(name: string) {
+  // 拡張子を外して安全なファイル名へ
+  const base = name.replace(/\.[^.]+$/, "");
+  return base.replace(/[\\/:*?"<>|]/g, "_").trim() || "image";
 }
+
+async function processOneFile(file: File, index: number, total: number): Promise<{ name: string; blob: Blob }> {
+  const lm = await initLandmarker();
+  const strength = Number(strengthEl.value);
+
+  statusEl.textContent = `処理中… ${index}/${total}：${file.name}`;
+
+  const img = await createImageBitmap(file);
+
+  // オフスクリーン（DOMに出さない）で処理
+  const c = document.createElement("canvas");
+  c.width = img.width;
+  c.height = img.height;
+  const ctx = c.getContext("2d")!;
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(img, 0, 0);
+
+  const res = lm.detect(img);
+  const faces = res.faceLandmarks ?? [];
+
+  // 1枚プレビュー（最後に処理したやつを表示）
+  preview.width = img.width;
+  preview.height = img.height;
+  pctx.imageSmoothingEnabled = true;
+  pctx.clearRect(0, 0, preview.width, preview.height);
+  pctx.drawImage(img, 0, 0);
+
+  if (faces.length === 0) {
+    // 顔なしでも"そのまま"返す（運用的に便利）
+    statusEl.textContent = `顔なし：${file.name}（そのまま保存）`;
+    const blob = await canvasToPngBlob(c);
+    return { name: `${safeBaseName(file.name)}_mosaic.png`, blob };
+  }
+
+  for (const face of faces) {
+    mosaicFaceOval(ctx, face as Landmark[], img.width, img.height, strength);
+    // previewにも同じモザイク（見た目確認用）
+    mosaicFaceOval(pctx, face as Landmark[], img.width, img.height, strength);
+  }
+
+  const blob = await canvasToPngBlob(c);
+  return { name: `${safeBaseName(file.name)}_mosaic.png`, blob };
+}
+
+async function handleFiles(files: File[]) {
+  if (files.length === 0) return;
+
+  // 画像だけに絞る
+  const imgs = files.filter((f) => f.type.startsWith("image/"));
+  if (imgs.length === 0) {
+    statusEl.textContent = "画像ファイルが見つからない";
+    return;
+  }
+
+  downloadZipBtn.disabled = true;
+  lastZipBlob = null;
+
+  const zip = new JSZip();
+
+  try {
+    // 逐次処理（メモリ/CPU食い過ぎ防止）
+    let i = 0;
+    for (const f of imgs) {
+      i += 1;
+      const out = await processOneFile(f, i, imgs.length);
+      zip.file(out.name, out.blob);
+    }
+
+    statusEl.textContent = `ZIP生成中…（${imgs.length}枚）`;
+    lastZipBlob = await zip.generateAsync({ type: "blob" });
+
+    downloadZipBtn.disabled = false;
+    statusEl.textContent = `完了：${imgs.length}枚（ZIP保存OK）`;
+  } catch (e) {
+    console.error(e);
+    statusEl.textContent = "エラー（コンソール見て）";
+  }
+}
+
+fileEl.addEventListener("change", async () => {
+  await handleFiles(Array.from(fileEl.files ?? []));
+});
+
+// ドラッグ＆ドロップ
+dropEl.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  dropEl.style.background = "#f0f7ff";
+  dropEl.style.borderColor = "#5aa6ff";
+});
+
+dropEl.addEventListener("dragleave", () => {
+  dropEl.style.background = "#fafafa";
+  dropEl.style.borderColor = "#bbb";
+});
+
+dropEl.addEventListener("drop", async (e) => {
+  e.preventDefault();
+  dropEl.style.background = "#fafafa";
+  dropEl.style.borderColor = "#bbb";
+
+  const dt = e.dataTransfer;
+  if (!dt) return;
+
+  const files = Array.from(dt.files ?? []);
+  await handleFiles(files);
+});
+
+downloadZipBtn.addEventListener("click", () => {
+  if (!lastZipBlob) return;
+
+  const url = URL.createObjectURL(lastZipBlob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "face-oval-mosaic.zip";
+  a.click();
+
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+
+// 初期表示
+statusEl.textContent = "画像を選ぶか、ドラッグ＆ドロップしてね";

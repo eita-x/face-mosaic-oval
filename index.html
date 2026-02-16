@@ -6,22 +6,42 @@
     <title>Face Oval Mosaic</title>
   </head>
   <body>
-    <div style="max-width: 920px; margin: 24px auto; font-family: system-ui, -apple-system, sans-serif;">
-      <h1 style="margin: 0 0 12px;">輪郭ピッタリ顔モザイク（写真のみ）</h1>
+    <div style="max-width: 980px; margin: 24px auto; font-family: system-ui, -apple-system, sans-serif;">
+      <h1 style="margin: 0 0 12px;">輪郭ピッタリ顔モザイク（写真のみ / 一括ZIP）</h1>
 
       <div style="display:flex; gap:12px; align-items:center; flex-wrap: wrap; margin-bottom: 12px;">
-        <input id="file" type="file" accept="image/*" />
+        <input id="file" type="file" accept="image/*" multiple />
         <label style="display:flex; gap:8px; align-items:center;">
           粗さ
           <input id="strength" type="range" min="6" max="40" value="18" />
           <span id="strengthVal">18</span>
         </label>
-        <button id="download">画像を保存</button>
+        <button id="downloadZip" disabled>ZIPを保存</button>
         <span id="status" style="opacity:.75;"></span>
       </div>
 
-      <canvas id="canvas" style="width:100%; border:1px solid #ddd; border-radius: 10px;"></canvas>
-      <p style="opacity:.7; margin-top:12px;">※画像は端末内で処理（アップロードなし）</p>
+      <div id="drop"
+        style="
+          border:2px dashed #bbb;
+          border-radius: 14px;
+          padding: 18px;
+          margin-bottom: 12px;
+          background: #fafafa;
+          user-select: none;
+        ">
+        <div style="font-size: 14px; opacity:.8;">
+          ここに画像をドラッグ＆ドロップ（複数OK）<br/>
+          または上のファイル選択でまとめて追加
+        </div>
+      </div>
+
+      <div style="display:grid; grid-template-columns: 1fr; gap:10px;">
+        <canvas id="preview" style="width:100%; border:1px solid #ddd; border-radius: 10px;"></canvas>
+      </div>
+
+      <p style="opacity:.7; margin-top:12px;">
+        ※画像は端末内で処理（アップロードなし） / 複数枚はZIPで一括保存
+      </p>
     </div>
 
     <script type="module" src="/src/main.ts"></script>
